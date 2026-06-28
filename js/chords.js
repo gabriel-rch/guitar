@@ -11,9 +11,9 @@ const CHORDS = {
     label: "A Major",
     family: "major",
     frets: ["x", 0, 2, 2, 2, 0],
-    fingers: [null, null, 1, 2, 3, null],
+    fingers: [null, null, 2, 1, 3, null],
     baseFret: 1,
-    tip: "Cram fingers 1‑2‑3 into the 2nd fret on the D, G and B strings. Keep them arched so the high E rings out.",
+    tip: "Cram fingers 2‑1‑3 into the 2nd fret on the D, G and B strings. Keep them arched so the high E rings out.",
   },
   D: {
     name: "D",
