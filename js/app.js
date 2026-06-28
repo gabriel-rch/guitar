@@ -355,6 +355,7 @@ function viewChanges() {
   let count = 0;
   let timerId = null;
   let running = false;
+  let micOn = false;
 
   function refresh() {
     stage.innerHTML = "";
@@ -385,6 +386,29 @@ function viewChanges() {
 
     stage.appendChild(el("div", { class: "changes-meters" }, clock, counter));
     stage.appendChild(controls);
+    // --- microphone auto-count ---
+    if (Mic.supported) {
+      const meterFill = el("span", { class: "mic-meter__fill", id: "mic-fill" });
+      const micBtn = el(
+        "button",
+        {
+          class: "mic-toggle" + (micOn ? " is-on" : ""),
+          id: "mic-btn",
+          onclick: toggleMic,
+        },
+        el("span", { class: "mic-toggle__dot" }),
+        micOn ? "Listening — auto-counting strums" : "🎤 Auto-count with microphone"
+      );
+      stage.appendChild(
+        el(
+          "div",
+          { class: "mic" + (micOn ? " is-on" : "") },
+          micBtn,
+          el("div", { class: "mic-meter", title: "Input level" }, meterFill)
+        )
+      );
+    }
+
     stage.appendChild(
       el(
         "p",
@@ -394,9 +418,40 @@ function viewChanges() {
         " to start/stop and ",
         el("kbd", {}, "C"),
         " to count. ",
-        el("span", { class: "soon" }, "Coming soon: automatic counting by listening through your microphone.")
+        el(
+          "span",
+          { class: "soon" },
+          Mic.supported
+            ? "Or let the mic count for you — it listens for strums and bumps the counter while the timer runs."
+            : "Automatic mic counting isn't available in this browser."
+        )
       )
     );
+  }
+
+  async function toggleMic() {
+    if (Mic.active) {
+      Mic.stop();
+      micOn = false;
+      refresh();
+      return;
+    }
+    const btn = document.getElementById("mic-btn");
+    try {
+      if (btn) btn.classList.add("is-loading");
+      await Mic.start({
+        onOnset: () => bumpCount(),
+        onLevel: (lvl) => {
+          const f = document.getElementById("mic-fill");
+          if (f) f.style.transform = `scaleX(${lvl.toFixed(3)})`;
+        },
+      });
+      micOn = true;
+    } catch (e) {
+      micOn = false;
+      alert("Couldn't access the microphone. Check your browser's mic permission and try again.");
+    }
+    refresh();
   }
 
   function diagramBlock(key) {
@@ -492,6 +547,15 @@ function viewChanges() {
   };
   document.addEventListener("keydown", onKey);
 
+  // release the mic when navigating away from this view
+  const onLeave = () => {
+    if (!location.hash.startsWith("#/changes")) {
+      Mic.stop();
+      window.removeEventListener("hashchange", onLeave);
+    }
+  };
+  window.addEventListener("hashchange", onLeave);
+
   refresh();
   app.appendChild(wrap);
   stagger();
@@ -562,5 +626,106 @@ const Sound = (() => {
         beep(880, 0.45, 0.4, "sawtooth", 0.2);
       } catch (e) {}
     },
+  };
+})();
+
+// ---------------------------------------------------------------------------
+// Mic — strum onset detection for automatic change counting.
+//
+// We don't need to recognise the chord; we only need to detect *that* a strum
+// happened. A strum is a sudden broadband burst of energy, so we watch for
+// spikes in spectral flux (the frame-to-frame rise in the magnitude spectrum)
+// over an adaptive baseline, with a refractory window so one strum counts once.
+// ---------------------------------------------------------------------------
+const Mic = (() => {
+  let ctx, stream, source, analyser, raf;
+  let prevSpec = null;
+  let baseline = 0; // rolling average of flux, our adaptive noise floor
+  let lastOnset = 0;
+  let onOnset = null;
+  let onLevel = null;
+
+  const REFRACTORY_MS = 220; // ignore retriggers within this window
+  const MIN_FLUX = 0.012; // absolute floor so quiet rooms don't self-trigger
+  const FACTOR = 2.6; // flux must exceed baseline by this multiple
+
+  function loop() {
+    raf = requestAnimationFrame(loop);
+    const bins = analyser.frequencyBinCount;
+    const spec = new Float32Array(bins);
+    analyser.getFloatFrequencyData(spec); // dBFS, ~ -140..0
+
+    // spectral flux: sum of positive changes, normalised per bin into 0..1-ish
+    let flux = 0;
+    let level = 0;
+    for (let i = 0; i < bins; i++) {
+      const cur = (spec[i] + 140) / 140; // -> 0..1
+      level += cur;
+      if (prevSpec) {
+        const d = cur - prevSpec[i];
+        if (d > 0) flux += d;
+      }
+      if (!prevSpec) prevSpec = new Float32Array(bins);
+      prevSpec[i] = cur;
+    }
+    flux /= bins;
+    level /= bins;
+
+    if (onLevel) onLevel(Math.min(1, level * 1.6));
+
+    const now = performance.now();
+    const isOnset =
+      flux > MIN_FLUX &&
+      flux > baseline * FACTOR &&
+      now - lastOnset > REFRACTORY_MS;
+
+    if (isOnset) {
+      lastOnset = now;
+      if (onOnset) onOnset();
+    } else {
+      // only let the baseline drift on non-onset frames
+      baseline = baseline * 0.92 + flux * 0.08;
+    }
+  }
+
+  async function start(handlers = {}) {
+    onOnset = handlers.onOnset || null;
+    onLevel = handlers.onLevel || null;
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+    });
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === "suspended") await ctx.resume();
+    source = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0;
+    source.connect(analyser);
+    prevSpec = null;
+    baseline = 0;
+    lastOnset = 0;
+    loop();
+  }
+
+  function stop() {
+    if (raf) cancelAnimationFrame(raf);
+    raf = null;
+    try { source && source.disconnect(); } catch (e) {}
+    try { stream && stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+    try { ctx && ctx.close(); } catch (e) {}
+    ctx = stream = source = analyser = null;
+    prevSpec = null;
+    onOnset = onLevel = null;
+  }
+
+  return {
+    start,
+    stop,
+    get active() { return !!raf; },
+    supported: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
   };
 })();

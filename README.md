@@ -16,7 +16,9 @@ runs anywhere, including GitHub Pages.
   place → play each string → adjust → lift off & repeat.
 - **One Minute Changes** — pick two chords and switch between them as many times
   as you can in 60 seconds. Start/stop with **Space**, count each change with
-  **C** (or tap the counter), and a buzzer tells you when time's up.
+  **C** (or tap the counter), and a buzzer tells you when time's up. Or enable
+  **🎤 Auto-count with microphone** to have the app listen for strums and bump
+  the counter for you while the timer runs.
 
 ## Run locally
 
@@ -50,12 +52,18 @@ G7: {
 }
 ```
 
-## Roadmap
+## How mic auto-counting works
 
-- 🎤 **Automatic change counting** for One Minute Changes — listen through the
-  microphone and increment the counter when a chord strum is detected (it only
-  needs to detect *that* something was played, not whether it was the right
-  chord). Stubbed in the UI as "coming soon".
+The detector (`Mic` in `js/app.js`) doesn't recognise chords — it only needs to
+hear *that* a strum happened. It runs the mic through an `AnalyserNode` and
+watches **spectral flux** (the frame-to-frame rise in the magnitude spectrum).
+A strum is a sudden broadband burst, so when flux spikes above an adaptive noise
+floor it registers an onset; a short refractory window keeps one strum from
+counting twice. Onsets only increment the counter while the timer is running.
+
+Browsers only grant mic access over `https://` (or `http://localhost`), so use
+the local server below rather than opening the file directly when testing the
+mic.
 
 ---
 
